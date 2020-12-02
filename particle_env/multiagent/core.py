@@ -1,6 +1,8 @@
 import numpy as np
 
 # physical/external base state of all entites
+
+
 class EntityState(object):
     def __init__(self):
         # physical position
@@ -9,6 +11,8 @@ class EntityState(object):
         self.p_vel = None
 
 # state of agents (including communication and internal/mental state)
+
+
 class AgentState(EntityState):
     def __init__(self):
         super(AgentState, self).__init__()
@@ -16,6 +20,8 @@ class AgentState(EntityState):
         self.c = None
 
 # action of the agent
+
+
 class Action(object):
     def __init__(self):
         # physical action
@@ -24,9 +30,11 @@ class Action(object):
         self.c = None
 
 # properties and state of physical world entity
+
+
 class Entity(object):
     def __init__(self):
-        # name 
+        # name
         self.name = ''
         # properties:
         self.size = 0.050
@@ -45,17 +53,33 @@ class Entity(object):
         self.state = EntityState()
         # mass
         self.initial_mass = 1.0
+        self.damped = True
+        # if not none, set of points to follow per timestep
+        self.t = 0
+        self.rails = None
 
     @property
     def mass(self):
         return self.initial_mass
 
 # properties of landmark entities
+
+
 class Landmark(Entity):
-     def __init__(self):
+    def __init__(self):
         super(Landmark, self).__init__()
+        self.u_noise = None
+
+    @property
+    def force(self):
+        return self.get_force()
+
+    def get_force(self):
+        return np.zeros(2)
 
 # properties of agent entities
+
+
 class Agent(Entity):
     def __init__(self):
         super(Agent, self).__init__()
@@ -79,6 +103,8 @@ class Agent(Entity):
         self.action_callback = None
 
 # multi-agent world
+
+
 class World(object):
     def __init__(self):
         # list of agents and entities (can change at execution-time!)
@@ -115,17 +141,21 @@ class World(object):
 
     # update state of the world
     def step(self):
-        # set actions for scripted agents 
+        # set actions for scripted agents
         for agent in self.scripted_agents:
             agent.action = agent.action_callback(agent, self)
         # gather forces applied to entities
         p_force = [None] * len(self.entities)
         # apply agent physical controls
         p_force = self.apply_action_force(p_force)
+        # apply landmark forces
+        p_force = self.apply_landmark_force(p_force)
         # apply environment forces
         p_force = self.apply_environment_force(p_force)
         # integrate physical state
         self.integrate_state(p_force)
+        # increment rails
+        self.increment_rails()
         # update agent state
         for agent in self.agents:
             self.update_agent_state(agent)
@@ -133,55 +163,79 @@ class World(object):
     # gather agent action forces
     def apply_action_force(self, p_force):
         # set applied forces
-        for i,agent in enumerate(self.agents):
+        for i, agent in enumerate(self.agents):
             if agent.movable:
-                noise = np.random.randn(*agent.action.u.shape) * agent.u_noise if agent.u_noise else 0.0
-                p_force[i] = agent.action.u + noise                
+                noise = np.random.randn(
+                    *agent.action.u.shape) * agent.u_noise if agent.u_noise else 0.0
+                p_force[i] = agent.action.u + noise
+        return p_force
+
+    def apply_landmark_force(self, p_force):
+        # set applied forces
+        for i, landmark in enumerate(self.landmarks):
+            if landmark.movable:
+                noise = np.random.randn(
+                    *landmark.force.shape) * landmark.u_noise if landmark.u_noise else 0.0
+                p_force[len(self.agents) + i] = landmark.force + noise
         return p_force
 
     # gather physical forces acting on entities
     def apply_environment_force(self, p_force):
         # simple (but inefficient) collision response
-        for a,entity_a in enumerate(self.entities):
-            for b,entity_b in enumerate(self.entities):
-                if(b <= a): continue
+        for a, entity_a in enumerate(self.entities):
+            for b, entity_b in enumerate(self.entities):
+                if(b <= a):
+                    continue
                 [f_a, f_b] = self.get_collision_force(entity_a, entity_b)
                 if(f_a is not None):
-                    if(p_force[a] is None): p_force[a] = 0.0
-                    p_force[a] = f_a + p_force[a] 
+                    if(p_force[a] is None):
+                        p_force[a] = 0.0
+                    p_force[a] = f_a + p_force[a]
                 if(f_b is not None):
-                    if(p_force[b] is None): p_force[b] = 0.0
-                    p_force[b] = f_b + p_force[b]        
+                    if(p_force[b] is None):
+                        p_force[b] = 0.0
+                    p_force[b] = f_b + p_force[b]
         return p_force
 
     # integrate physical state
     def integrate_state(self, p_force):
-        for i,entity in enumerate(self.entities):
-            if not entity.movable: continue
-            entity.state.p_vel = entity.state.p_vel * (1 - self.damping)
+        for i, entity in enumerate(self.entities):
+            if not entity.movable:
+                continue
+            if entity.damped:
+                entity.state.p_vel = entity.state.p_vel * (1 - self.damping)
             if (p_force[i] is not None):
                 entity.state.p_vel += (p_force[i] / entity.mass) * self.dt
             if entity.max_speed is not None:
-                speed = np.sqrt(np.square(entity.state.p_vel[0]) + np.square(entity.state.p_vel[1]))
+                speed = np.sqrt(
+                    np.square(entity.state.p_vel[0]) + np.square(entity.state.p_vel[1]))
                 if speed > entity.max_speed:
                     entity.state.p_vel = entity.state.p_vel / np.sqrt(np.square(entity.state.p_vel[0]) +
-                                                                  np.square(entity.state.p_vel[1])) * entity.max_speed
+                                                                      np.square(entity.state.p_vel[1])) * entity.max_speed
             entity.state.p_pos += entity.state.p_vel * self.dt
+
+    def increment_rails(self):
+        for i, entity in enumerate(self.entities):
+            if entity.rails is None:
+                continue
+            entity.t = (entity.t + 1) % entity.rails.shape[0]
+            entity.state.p_pos = entity.rails[entity.t, :]
 
     def update_agent_state(self, agent):
         # set communication state (directly for now)
         if agent.silent:
             agent.state.c = np.zeros(self.dim_c)
         else:
-            noise = np.random.randn(*agent.action.c.shape) * agent.c_noise if agent.c_noise else 0.0
-            agent.state.c = agent.action.c + noise      
+            noise = np.random.randn(*agent.action.c.shape) * \
+                agent.c_noise if agent.c_noise else 0.0
+            agent.state.c = agent.action.c + noise
 
     # get collision forces for any contact between two entities
     def get_collision_force(self, entity_a, entity_b):
         if (not entity_a.collide) or (not entity_b.collide):
-            return [None, None] # not a collider
+            return [None, None]  # not a collider
         if (entity_a is entity_b):
-            return [None, None] # don't collide against itself
+            return [None, None]  # don't collide against itself
         # compute actual distance between entities
         delta_pos = entity_a.state.p_pos - entity_b.state.p_pos
         dist = np.sqrt(np.sum(np.square(delta_pos)))
